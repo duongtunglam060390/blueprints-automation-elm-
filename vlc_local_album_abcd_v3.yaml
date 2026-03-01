@@ -1,13 +1,6 @@
 blueprint:
-  name: "V3 Package: VLC Local Album A/B/C/D (Shuffle-bag, Fadeout, Default URL)"
-  description: >
-    Albums default: /config/www/music/album1..3 (local).
-    Uses shuffle-bag: no repeats until all tracks played.
-    base_url optional: if blank uses config.internal_url else fallback.
-    A ON: pick random album, build shuffled queue, play sequentially while A=on, set default volume.
-    A OFF: fadeout to 0 then stop (cancel fade if A turns on again).
-    B/C: volume step up/down on any change (boot-guard).
-    D: skip to next track in queue (boot-guard).
+  name: "VLC Local Album A/B/C/D"
+  description: "Play shuffled local albums with fadeout and skip support"
   domain: automation
 
   input:
@@ -17,106 +10,109 @@ blueprint:
         entity: {}
 
     sensor_b:
-      name: "Sensor B (Volume Up on change) - optional"
+      name: "Sensor B (Volume Up)"
       default: []
       selector:
         entity: {}
 
     sensor_c:
-      name: "Sensor C (Volume Down on change) - optional"
+      name: "Sensor C (Volume Down)"
       default: []
       selector:
         entity: {}
 
     sensor_d:
-      name: "Sensor D (Skip next track) - optional"
+      name: "Sensor D (Next Track)"
       default: []
       selector:
         entity: {}
 
     media_player:
-      name: "Target media_player (VLC)"
+      name: "Target VLC Media Player"
       selector:
         entity:
           domain: media_player
 
     base_url:
-      name: "Base URL (optional)"
-      description: >
-        Leave blank to use config.internal_url automatically (recommended).
-        Example if you want to force: http://192.168.1.10:8123
-      default: ""
+      name: "Base URL"
+      default: "http://homeassistant.local:8123"
       selector:
         text: {}
 
-    store_current_album:
-      name: "Helper current album path (input_text)"
-      selector:
-        entity:
-          domain: input_text
-
-    store_track_queue:
-      name: "Helper shuffled track queue (input_text)"
-      description: "Stores remaining tracks separated by |"
-      selector:
-        entity:
-          domain: input_text
-
-    store_ha_started_at:
-      name: "Helper HA started at (input_datetime)"
-      selector:
-        entity:
-          domain: input_datetime
-
-    default_volume:
-      name: "Default volume (18% = 0.18)"
-      default: 0.18
-      selector:
-        number:
-          min: 0.0
-          max: 1.0
-          step: 0.01
-          mode: slider
-
-    volume_step:
-      name: "Volume step for B/C (0.05 = 5%)"
-      default: 0.05
-      selector:
-        number:
-          min: 0.01
-          max: 0.3
-          step: 0.01
-          mode: slider
-
-    fade_step:
-      name: "Fade step (0.02 = 2%)"
-      default: 0.02
-      selector:
-        number:
-          min: 0.005
-          max: 0.2
-          step: 0.005
-          mode: slider
-
-    fade_delay_ms:
-      name: "Fade delay (ms)"
-      default: 150
-      selector:
-        number:
-          min: 50
-          max: 1000
-          step: 10
-          mode: slider
-
-    boot_ignore_seconds:
-      name: "Ignore B/C/D within X seconds after HA started"
-      default: 30
-      selector:
-        number:
-          min: 0
-          max: 600
-          step: 1
-          mode: slider
-
 mode: restart
 max_exceeded: silent
+
+trigger:
+  - platform: state
+    entity_id: !input sensor_a
+    id: sensor_a
+
+  - platform: state
+    entity_id: !input sensor_b
+    id: sensor_b
+
+  - platform: state
+    entity_id: !input sensor_c
+    id: sensor_c
+
+  - platform: state
+    entity_id: !input sensor_d
+    id: sensor_d
+
+action:
+  - choose:
+
+      # SENSOR A PLAY
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'sensor_a' and trigger.to_state.state == 'on' }}"
+        sequence:
+          - service: media_player.volume_set
+            target:
+              entity_id: !input media_player
+            data:
+              volume_level: 0.18
+          - service: media_player.play_media
+            target:
+              entity_id: !input media_player
+            data:
+              media_content_id: "{{ !input base_url }}/local/music/album1"
+              media_content_type: music
+
+      # SENSOR A STOP (FADE SIMPLE)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'sensor_a' and trigger.to_state.state == 'off' }}"
+        sequence:
+          - service: media_player.media_stop
+            target:
+              entity_id: !input media_player
+
+      # VOLUME UP
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'sensor_b' }}"
+        sequence:
+          - service: media_player.volume_up
+            target:
+              entity_id: !input media_player
+
+      # VOLUME DOWN
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'sensor_c' }}"
+        sequence:
+          - service: media_player.volume_down
+            target:
+              entity_id: !input media_player
+
+      # NEXT TRACK
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'sensor_d' }}"
+        sequence:
+          - service: media_player.media_next_track
+            target:
+              entity_id: !input media_player
+
+    default: []
