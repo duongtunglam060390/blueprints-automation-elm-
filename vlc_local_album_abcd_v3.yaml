@@ -1,7 +1,8 @@
 blueprint:
-  name: "VLC Local Album A/B/C/D (Shuffle-bag + Fadeout + Boot Guard)"
+  name: "VLC Local Album A/B/C/D (Shuffle-bag + Fadeout + Boot Guard) - Fixed"
   description: >
-    A ON: pick random album (album1..3), shuffle-bag queue (no repeats until exhausted), play sequentially while A=on, set volume.
+    A ON: pick random album (album1..3), shuffle-bag queue (no repeats until exhausted),
+          play sequentially while A=on, set volume.
     A OFF: fadeout to 0 then stop (cancel fade if A turns on again).
     B change: volume up by step (boot guard).
     C change: volume down by step (boot guard).
@@ -141,7 +142,15 @@ trigger:
     id: d_any
 
 variables:
-  # default albums fixed
+  # entity ids from inputs (safe to use in templates)
+  sensor_a_ent: !input sensor_a
+  media_player_ent: !input media_player
+  store_album_ent: !input store_current_album
+  store_queue_ent: !input store_track_queue
+  store_started_ent: !input store_ha_started_at
+  base_url_in: !input base_url
+
+  # defaults
   albums:
     - "/config/www/music/album1"
     - "/config/www/music/album2"
@@ -154,9 +163,8 @@ variables:
   fade_delay_v: !input fade_delay_ms
   boot_ignore: !input boot_ignore_seconds
 
-  # resolve base url safely
   resolved_base: >
-    {% set u = ( !input base_url ) | string | trim %}
+    {% set u = (base_url_in | string | trim) %}
     {% if u != '' %}
       {{ u.rstrip('/') }}
     {% elif config.internal_url %}
@@ -227,10 +235,10 @@ action:
           - repeat:
               while:
                 - condition: template
-                  value_template: "{{ states(!input sensor_a) == 'on' }}"
+                  value_template: "{{ states(sensor_a_ent) == 'on' }}"
               sequence:
                 - variables:
-                    q: "{{ states(!input store_track_queue) | string }}"
+                    q: "{{ states(store_queue_ent) | string }}"
                     qlist: "{{ (q.split('|') if q|length>0 else []) }}"
                 - choose:
                     - conditions:
@@ -243,7 +251,7 @@ action:
                           data:
                             value: "{{ (files | shuffle) | join('|') }}"
                         - variables:
-                            qlist: "{{ (states(!input store_track_queue) | string).split('|') }}"
+                            qlist: "{{ (states(store_queue_ent) | string).split('|') }}"
                 - variables:
                     next_track: "{{ qlist[0] }}"
                     remaining: "{{ qlist[1:] }}"
@@ -262,8 +270,7 @@ action:
                     media_content_id: "{{ url }}"
                     media_content_type: music
 
-                # VLC usually ends in idle/paused/off
-                - wait_template: "{{ states(!input media_player) in ['idle','off','paused'] }}"
+                - wait_template: "{{ states(media_player_ent) in ['idle','off','paused'] }}"
                   timeout: "01:00:00"
                 - delay: "00:00:01"
 
@@ -273,16 +280,16 @@ action:
             value_template: "{{ trigger.id == 'a_any' and trigger.to_state is not none and trigger.to_state.state == 'off' }}"
         sequence:
           - variables:
-              cur: "{{ state_attr(!input media_player,'volume_level') | float(0) }}"
+              cur: "{{ state_attr(media_player_ent,'volume_level') | float(0) }}"
           - repeat:
               while:
                 - condition: template
-                  value_template: "{{ states(!input sensor_a) == 'off' and (cur | float(0)) > 0 }}"
+                  value_template: "{{ states(sensor_a_ent) == 'off' and (cur | float(0)) > 0 }}"
               sequence:
                 - choose:
                     - conditions:
                         - condition: template
-                          value_template: "{{ states(!input sensor_a) == 'on' }}"
+                          value_template: "{{ states(sensor_a_ent) == 'on' }}"
                       sequence:
                         - stop: "A turned back ON - cancel fadeout"
 
@@ -296,16 +303,14 @@ action:
                 - delay:
                     milliseconds: "{{ fade_delay_v | int(150) }}"
                 - variables:
-                    cur: "{{ state_attr(!input media_player,'volume_level') | float(0) }}"
+                    cur: "{{ state_attr(media_player_ent,'volume_level') | float(0) }}"
           - condition: template
-            value_template: "{{ states(!input sensor_a) == 'off' }}"
+            value_template: "{{ states(sensor_a_ent) == 'off' }}"
           - service: media_player.media_stop
             target:
               entity_id: !input media_player
 
-      # ===== B/C/D boot guard (applies in each) =====
-
-      # ===== B change -> volume up by step =====
+      # ===== B change -> volume up by step (boot guard) =====
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'b_any' }}"
@@ -316,7 +321,7 @@ action:
                  and trigger.to_state.state not in ['unknown','unavailable'] }}
           - condition: template
             value_template: >
-              {% set t0 = states(!input store_ha_started_at) %}
+              {% set t0 = states(store_started_ent) %}
               {% if boot_ignore | int(0) == 0 %} true
               {% elif t0 in ['unknown','unavailable',''] %} true
               {% else %}
@@ -324,7 +329,7 @@ action:
               {% endif %}
         sequence:
           - variables:
-              cur: "{{ state_attr(!input media_player,'volume_level') | float(0) }}"
+              cur: "{{ state_attr(media_player_ent,'volume_level') | float(0) }}"
               newv: "{{ [cur + (vol_step | float(0.05)), 1] | min }}"
           - service: media_player.volume_set
             target:
@@ -332,7 +337,7 @@ action:
             data:
               volume_level: "{{ newv }}"
 
-      # ===== C change -> volume down by step =====
+      # ===== C change -> volume down by step (boot guard) =====
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'c_any' }}"
@@ -343,7 +348,7 @@ action:
                  and trigger.to_state.state not in ['unknown','unavailable'] }}
           - condition: template
             value_template: >
-              {% set t0 = states(!input store_ha_started_at) %}
+              {% set t0 = states(store_started_ent) %}
               {% if boot_ignore | int(0) == 0 %} true
               {% elif t0 in ['unknown','unavailable',''] %} true
               {% else %}
@@ -351,7 +356,7 @@ action:
               {% endif %}
         sequence:
           - variables:
-              cur: "{{ state_attr(!input media_player,'volume_level') | float(0) }}"
+              cur: "{{ state_attr(media_player_ent,'volume_level') | float(0) }}"
               newv: "{{ [cur - (vol_step | float(0.05)), 0] | max }}"
           - service: media_player.volume_set
             target:
@@ -359,7 +364,7 @@ action:
             data:
               volume_level: "{{ newv }}"
 
-      # ===== D change -> next track from queue (no repeat) =====
+      # ===== D change -> next track from queue (boot guard) =====
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'd_any' }}"
@@ -370,7 +375,7 @@ action:
                  and trigger.to_state.state not in ['unknown','unavailable'] }}
           - condition: template
             value_template: >
-              {% set t0 = states(!input store_ha_started_at) %}
+              {% set t0 = states(store_started_ent) %}
               {% if boot_ignore | int(0) == 0 %} true
               {% elif t0 in ['unknown','unavailable',''] %} true
               {% else %}
@@ -378,7 +383,7 @@ action:
               {% endif %}
         sequence:
           - variables:
-              q: "{{ states(!input store_track_queue) | string }}"
+              q: "{{ states(store_queue_ent) | string }}"
               qlist: "{{ (q.split('|') if q|length>0 else []) }}"
           - condition: template
             value_template: "{{ qlist | count > 0 }}"
