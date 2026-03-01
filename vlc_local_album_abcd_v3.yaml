@@ -1,6 +1,11 @@
 blueprint:
-  name: "VLC Local Album A/B/C/D (Fixed)"
-  description: "Play local music via VLC with A/B/C/D controls"
+  name: "VLC Local Album A/B/C/D (Shuffle-bag + Fadeout + Boot Guard)"
+  description: >
+    A ON: pick random album (album1..3), shuffle-bag queue (no repeats until exhausted), play sequentially while A=on, set volume.
+    A OFF: fadeout to 0 then stop (cancel fade if A turns on again).
+    B change: volume up by step (boot guard).
+    C change: volume down by step (boot guard).
+    D change: skip to NEXT track in queue (boot guard).
   domain: automation
 
   input:
@@ -10,19 +15,19 @@ blueprint:
         entity: {}
 
     sensor_b:
-      name: "Sensor B (Volume Up)"
+      name: "Sensor B (Volume Up) - optional"
       default: []
       selector:
         entity: {}
 
     sensor_c:
-      name: "Sensor C (Volume Down)"
+      name: "Sensor C (Volume Down) - optional"
       default: []
       selector:
         entity: {}
 
     sensor_d:
-      name: "Sensor D (Next Track)"
+      name: "Sensor D (Next Track) - optional"
       default: []
       selector:
         entity: {}
@@ -34,98 +39,363 @@ blueprint:
           domain: media_player
 
     base_url:
-      name: "Base URL"
-      description: "Ví dụ: http://192.168.1.200:8123"
-      default: "http://homeassistant.local:8123"
+      name: "Base URL (optional)"
+      description: >
+        Leave blank to use config.internal_url automatically; fallback homeassistant.local.
+        Example: http://192.168.1.200:8123
+      default: ""
       selector:
         text: {}
 
-    test_track:
-      name: "Test track path under /local (để test nhanh)"
-      description: "Ví dụ: music/album1/test.mp3  (tương ứng /config/www/music/album1/test.mp3)"
-      default: "music/album1/test.mp3"
+    store_current_album:
+      name: "Helper current album (input_text)"
       selector:
-        text: {}
+        entity:
+          domain: input_text
+
+    store_track_queue:
+      name: "Helper track queue (input_text)"
+      description: "Stores remaining tracks separated by |"
+      selector:
+        entity:
+          domain: input_text
+
+    store_ha_started_at:
+      name: "Helper HA started at (input_datetime)"
+      selector:
+        entity:
+          domain: input_datetime
+
+    default_volume:
+      name: "Default volume (18% = 0.18)"
+      default: 0.18
+      selector:
+        number:
+          min: 0.0
+          max: 1.0
+          step: 0.01
+          mode: slider
+
+    volume_step:
+      name: "Volume step for B/C (0.05 = 5%)"
+      default: 0.05
+      selector:
+        number:
+          min: 0.01
+          max: 0.3
+          step: 0.01
+          mode: slider
+
+    fade_step:
+      name: "Fade step (0.02 = 2%)"
+      default: 0.02
+      selector:
+        number:
+          min: 0.005
+          max: 0.2
+          step: 0.005
+          mode: slider
+
+    fade_delay_ms:
+      name: "Fade delay (ms)"
+      default: 150
+      selector:
+        number:
+          min: 50
+          max: 1000
+          step: 10
+          mode: slider
+
+    boot_ignore_seconds:
+      name: "Ignore B/C/D within X seconds after HA started"
+      default: 30
+      selector:
+        number:
+          min: 0
+          max: 600
+          step: 1
+          mode: slider
 
 mode: restart
 max_exceeded: silent
 
 trigger:
+  - platform: homeassistant
+    event: start
+    id: ha_start
+
   - platform: state
     entity_id: !input sensor_a
-    id: sensor_a
+    id: a_any
 
   - platform: state
     entity_id: !input sensor_b
-    id: sensor_b
+    id: b_any
 
   - platform: state
     entity_id: !input sensor_c
-    id: sensor_c
+    id: c_any
 
   - platform: state
     entity_id: !input sensor_d
-    id: sensor_d
+    id: d_any
 
 variables:
-  mp: !input media_player
-  base: !input base_url
-  track: !input test_track
+  # default albums fixed
+  albums:
+    - "/config/www/music/album1"
+    - "/config/www/music/album2"
+    - "/config/www/music/album3"
+  exts: ['.mp3','.m4a','.wav','.flac','.ogg']
+
+  vol_default: !input default_volume
+  vol_step: !input volume_step
+  fade_step_v: !input fade_step
+  fade_delay_v: !input fade_delay_ms
+  boot_ignore: !input boot_ignore_seconds
+
+  # resolve base url safely
+  resolved_base: >
+    {% set u = ( !input base_url ) | string | trim %}
+    {% if u != '' %}
+      {{ u.rstrip('/') }}
+    {% elif config.internal_url %}
+      {{ (config.internal_url | string).rstrip('/') }}
+    {% elif config.external_url %}
+      {{ (config.external_url | string).rstrip('/') }}
+    {% else %}
+      {{ 'http://homeassistant.local:8123' }}
+    {% endif %}
 
 action:
   - choose:
 
-      # A ON -> play test track (để xác nhận VLC đọc được /local)
+      # ===== HA start -> store timestamp for boot guard =====
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'sensor_a' and trigger.to_state is not none and trigger.to_state.state == 'on' }}"
+            value_template: "{{ trigger.id == 'ha_start' }}"
         sequence:
+          - service: input_datetime.set_datetime
+            target:
+              entity_id: !input store_ha_started_at
+            data:
+              datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+      # ===== A ON -> pick album, build shuffle queue, loop play =====
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger.id == 'a_any' and trigger.to_state is not none and trigger.to_state.state == 'on' }}"
+        sequence:
+          - variables:
+              album: "{{ albums | random }}"
+
+          - service: input_text.set_value
+            target:
+              entity_id: !input store_current_album
+            data:
+              value: "{{ album }}"
+
           - service: media_player.volume_set
             target:
-              entity_id: "{{ mp }}"
+              entity_id: !input media_player
             data:
-              volume_level: 0.18
-          - service: media_player.play_media
-            target:
-              entity_id: "{{ mp }}"
-            data:
-              media_content_id: "{{ base.rstrip('/') ~ '/local/' ~ track }}"
-              media_content_type: music
+              volume_level: "{{ vol_default | float(0.18) }}"
 
-      # A OFF -> stop
+          # scan files and shuffle
+          - variables:
+              files: >
+                {% set fs = (album | listdir) %}
+                {% set out = [] %}
+                {% for f in fs %}
+                  {% set lf = f | lower %}
+                  {% if exts | select('in', lf) | list | count > 0 %}
+                    {% set rel = (album ~ '/' ~ f) | replace('/config/www/','') %}
+                    {% set _ = out.append(rel) %}
+                  {% endif %}
+                {% endfor %}
+                {{ out }}
+          - condition: template
+            value_template: "{{ files | count > 0 }}"
+
+          - service: input_text.set_value
+            target:
+              entity_id: !input store_track_queue
+            data:
+              value: "{{ (files | shuffle) | join('|') }}"
+
+          # loop while A=on
+          - repeat:
+              while:
+                - condition: template
+                  value_template: "{{ states(!input sensor_a) == 'on' }}"
+              sequence:
+                - variables:
+                    q: "{{ states(!input store_track_queue) | string }}"
+                    qlist: "{{ (q.split('|') if q|length>0 else []) }}"
+                - choose:
+                    - conditions:
+                        - condition: template
+                          value_template: "{{ qlist | count == 0 }}"
+                      sequence:
+                        - service: input_text.set_value
+                          target:
+                            entity_id: !input store_track_queue
+                          data:
+                            value: "{{ (files | shuffle) | join('|') }}"
+                        - variables:
+                            qlist: "{{ (states(!input store_track_queue) | string).split('|') }}"
+                - variables:
+                    next_track: "{{ qlist[0] }}"
+                    remaining: "{{ qlist[1:] }}"
+                    url: "{{ resolved_base ~ '/local/' ~ next_track }}"
+
+                - service: input_text.set_value
+                  target:
+                    entity_id: !input store_track_queue
+                  data:
+                    value: "{{ remaining | join('|') }}"
+
+                - service: media_player.play_media
+                  target:
+                    entity_id: !input media_player
+                  data:
+                    media_content_id: "{{ url }}"
+                    media_content_type: music
+
+                # VLC usually ends in idle/paused/off
+                - wait_template: "{{ states(!input media_player) in ['idle','off','paused'] }}"
+                  timeout: "01:00:00"
+                - delay: "00:00:01"
+
+      # ===== A OFF -> fadeout then stop (cancel if A turns ON) =====
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'sensor_a' and trigger.to_state is not none and trigger.to_state.state == 'off' }}"
+            value_template: "{{ trigger.id == 'a_any' and trigger.to_state is not none and trigger.to_state.state == 'off' }}"
         sequence:
+          - variables:
+              cur: "{{ state_attr(!input media_player,'volume_level') | float(0) }}"
+          - repeat:
+              while:
+                - condition: template
+                  value_template: "{{ states(!input sensor_a) == 'off' and (cur | float(0)) > 0 }}"
+              sequence:
+                - choose:
+                    - conditions:
+                        - condition: template
+                          value_template: "{{ states(!input sensor_a) == 'on' }}"
+                      sequence:
+                        - stop: "A turned back ON - cancel fadeout"
+
+                - variables:
+                    newv: "{{ [ (cur | float(0)) - (fade_step_v | float(0.02)), 0 ] | max }}"
+                - service: media_player.volume_set
+                  target:
+                    entity_id: !input media_player
+                  data:
+                    volume_level: "{{ newv }}"
+                - delay:
+                    milliseconds: "{{ fade_delay_v | int(150) }}"
+                - variables:
+                    cur: "{{ state_attr(!input media_player,'volume_level') | float(0) }}"
+          - condition: template
+            value_template: "{{ states(!input sensor_a) == 'off' }}"
           - service: media_player.media_stop
             target:
-              entity_id: "{{ mp }}"
+              entity_id: !input media_player
 
-      # B -> volume up
+      # ===== B/C/D boot guard (applies in each) =====
+
+      # ===== B change -> volume up by step =====
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'sensor_b' }}"
+            value_template: "{{ trigger.id == 'b_any' }}"
+          - condition: template
+            value_template: >
+              {{ trigger.from_state is not none
+                 and trigger.from_state.state not in ['unknown','unavailable']
+                 and trigger.to_state.state not in ['unknown','unavailable'] }}
+          - condition: template
+            value_template: >
+              {% set t0 = states(!input store_ha_started_at) %}
+              {% if boot_ignore | int(0) == 0 %} true
+              {% elif t0 in ['unknown','unavailable',''] %} true
+              {% else %}
+                {{ (as_timestamp(now()) - as_timestamp(t0)) > (boot_ignore | int) }}
+              {% endif %}
         sequence:
-          - service: media_player.volume_up
+          - variables:
+              cur: "{{ state_attr(!input media_player,'volume_level') | float(0) }}"
+              newv: "{{ [cur + (vol_step | float(0.05)), 1] | min }}"
+          - service: media_player.volume_set
             target:
-              entity_id: "{{ mp }}"
+              entity_id: !input media_player
+            data:
+              volume_level: "{{ newv }}"
 
-      # C -> volume down
+      # ===== C change -> volume down by step =====
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'sensor_c' }}"
+            value_template: "{{ trigger.id == 'c_any' }}"
+          - condition: template
+            value_template: >
+              {{ trigger.from_state is not none
+                 and trigger.from_state.state not in ['unknown','unavailable']
+                 and trigger.to_state.state not in ['unknown','unavailable'] }}
+          - condition: template
+            value_template: >
+              {% set t0 = states(!input store_ha_started_at) %}
+              {% if boot_ignore | int(0) == 0 %} true
+              {% elif t0 in ['unknown','unavailable',''] %} true
+              {% else %}
+                {{ (as_timestamp(now()) - as_timestamp(t0)) > (boot_ignore | int) }}
+              {% endif %}
         sequence:
-          - service: media_player.volume_down
+          - variables:
+              cur: "{{ state_attr(!input media_player,'volume_level') | float(0) }}"
+              newv: "{{ [cur - (vol_step | float(0.05)), 0] | max }}"
+          - service: media_player.volume_set
             target:
-              entity_id: "{{ mp }}"
+              entity_id: !input media_player
+            data:
+              volume_level: "{{ newv }}"
 
-      # D -> next track
+      # ===== D change -> next track from queue (no repeat) =====
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'sensor_d' }}"
+            value_template: "{{ trigger.id == 'd_any' }}"
+          - condition: template
+            value_template: >
+              {{ trigger.from_state is not none
+                 and trigger.from_state.state not in ['unknown','unavailable']
+                 and trigger.to_state.state not in ['unknown','unavailable'] }}
+          - condition: template
+            value_template: >
+              {% set t0 = states(!input store_ha_started_at) %}
+              {% if boot_ignore | int(0) == 0 %} true
+              {% elif t0 in ['unknown','unavailable',''] %} true
+              {% else %}
+                {{ (as_timestamp(now()) - as_timestamp(t0)) > (boot_ignore | int) }}
+              {% endif %}
         sequence:
-          - service: media_player.media_next_track
+          - variables:
+              q: "{{ states(!input store_track_queue) | string }}"
+              qlist: "{{ (q.split('|') if q|length>0 else []) }}"
+          - condition: template
+            value_template: "{{ qlist | count > 0 }}"
+          - variables:
+              next_track: "{{ qlist[0] }}"
+              remaining: "{{ qlist[1:] }}"
+              url: "{{ resolved_base ~ '/local/' ~ next_track }}"
+          - service: input_text.set_value
             target:
-              entity_id: "{{ mp }}"
+              entity_id: !input store_track_queue
+            data:
+              value: "{{ remaining | join('|') }}"
+          - service: media_player.play_media
+            target:
+              entity_id: !input media_player
+            data:
+              media_content_id: "{{ url }}"
+              media_content_type: music
 
     default: []
