@@ -1,6 +1,6 @@
 blueprint:
-  name: "VLC Local Album A/B/C/D"
-  description: "Play shuffled local albums with fadeout and skip support"
+  name: "VLC Local Album A/B/C/D (Fixed)"
+  description: "Play local music via VLC with A/B/C/D controls"
   domain: automation
 
   input:
@@ -35,7 +35,15 @@ blueprint:
 
     base_url:
       name: "Base URL"
+      description: "Ví dụ: http://192.168.1.200:8123"
       default: "http://homeassistant.local:8123"
+      selector:
+        text: {}
+
+    test_track:
+      name: "Test track path under /local (để test nhanh)"
+      description: "Ví dụ: music/album1/test.mp3  (tương ứng /config/www/music/album1/test.mp3)"
+      default: "music/album1/test.mp3"
       selector:
         text: {}
 
@@ -59,60 +67,65 @@ trigger:
     entity_id: !input sensor_d
     id: sensor_d
 
+variables:
+  mp: !input media_player
+  base: !input base_url
+  track: !input test_track
+
 action:
   - choose:
 
-      # SENSOR A PLAY
+      # A ON -> play test track (để xác nhận VLC đọc được /local)
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'sensor_a' and trigger.to_state.state == 'on' }}"
+            value_template: "{{ trigger.id == 'sensor_a' and trigger.to_state is not none and trigger.to_state.state == 'on' }}"
         sequence:
           - service: media_player.volume_set
             target:
-              entity_id: !input media_player
+              entity_id: "{{ mp }}"
             data:
               volume_level: 0.18
           - service: media_player.play_media
             target:
-              entity_id: !input media_player
+              entity_id: "{{ mp }}"
             data:
-              media_content_id: "{{ !input base_url }}/local/music/album1"
+              media_content_id: "{{ base.rstrip('/') ~ '/local/' ~ track }}"
               media_content_type: music
 
-      # SENSOR A STOP (FADE SIMPLE)
+      # A OFF -> stop
       - conditions:
           - condition: template
-            value_template: "{{ trigger.id == 'sensor_a' and trigger.to_state.state == 'off' }}"
+            value_template: "{{ trigger.id == 'sensor_a' and trigger.to_state is not none and trigger.to_state.state == 'off' }}"
         sequence:
           - service: media_player.media_stop
             target:
-              entity_id: !input media_player
+              entity_id: "{{ mp }}"
 
-      # VOLUME UP
+      # B -> volume up
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'sensor_b' }}"
         sequence:
           - service: media_player.volume_up
             target:
-              entity_id: !input media_player
+              entity_id: "{{ mp }}"
 
-      # VOLUME DOWN
+      # C -> volume down
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'sensor_c' }}"
         sequence:
           - service: media_player.volume_down
             target:
-              entity_id: !input media_player
+              entity_id: "{{ mp }}"
 
-      # NEXT TRACK
+      # D -> next track
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'sensor_d' }}"
         sequence:
           - service: media_player.media_next_track
             target:
-              entity_id: !input media_player
+              entity_id: "{{ mp }}"
 
     default: []
