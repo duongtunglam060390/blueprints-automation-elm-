@@ -1,5 +1,5 @@
 blueprint:
-  name: "VLC Local Album A/B/C/D (Shuffle-bag + Fadeout + Boot Guard) - Fixed"
+  name: "VLC Local Album A/B/C/D (Shuffle-bag + Fadeout + Boot Guard) FINAL"
   description: >
     A ON: pick random album (album1..3), shuffle-bag queue (no repeats until exhausted),
           play sequentially while A=on, set volume.
@@ -40,11 +40,9 @@ blueprint:
           domain: media_player
 
     base_url:
-      name: "Base URL (optional)"
-      description: >
-        Leave blank to use config.internal_url automatically; fallback homeassistant.local.
-        Example: http://192.168.1.200:8123
-      default: ""
+      name: "Base URL"
+      description: "Ví dụ: http://192.168.1.200:8123"
+      default: "http://homeassistant.local:8123"
       selector:
         text: {}
 
@@ -142,15 +140,14 @@ trigger:
     id: d_any
 
 variables:
-  # entity ids from inputs (safe to use in templates)
+  # Inputs as plain variables (safe in templates)
   sensor_a_ent: !input sensor_a
   media_player_ent: !input media_player
   store_album_ent: !input store_current_album
   store_queue_ent: !input store_track_queue
   store_started_ent: !input store_ha_started_at
-  base_url_in: !input base_url
+  base: !input base_url
 
-  # defaults
   albums:
     - "/config/www/music/album1"
     - "/config/www/music/album2"
@@ -163,22 +160,10 @@ variables:
   fade_delay_v: !input fade_delay_ms
   boot_ignore: !input boot_ignore_seconds
 
-  resolved_base: >
-    {% set u = (base_url_in | string | trim) %}
-    {% if u != '' %}
-      {{ u.rstrip('/') }}
-    {% elif config.internal_url %}
-      {{ (config.internal_url | string).rstrip('/') }}
-    {% elif config.external_url %}
-      {{ (config.external_url | string).rstrip('/') }}
-    {% else %}
-      {{ 'http://homeassistant.local:8123' }}
-    {% endif %}
-
 action:
   - choose:
 
-      # ===== HA start -> store timestamp for boot guard =====
+      # ===== HA start -> store timestamp =====
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'ha_start' }}"
@@ -209,7 +194,6 @@ action:
             data:
               volume_level: "{{ vol_default | float(0.18) }}"
 
-          # scan files and shuffle
           - variables:
               files: >
                 {% set fs = (album | listdir) %}
@@ -231,7 +215,6 @@ action:
             data:
               value: "{{ (files | shuffle) | join('|') }}"
 
-          # loop while A=on
           - repeat:
               while:
                 - condition: template
@@ -240,6 +223,7 @@ action:
                 - variables:
                     q: "{{ states(store_queue_ent) | string }}"
                     qlist: "{{ (q.split('|') if q|length>0 else []) }}"
+
                 - choose:
                     - conditions:
                         - condition: template
@@ -251,11 +235,13 @@ action:
                           data:
                             value: "{{ (files | shuffle) | join('|') }}"
                         - variables:
-                            qlist: "{{ (states(store_queue_ent) | string).split('|') }}"
+                            q: "{{ states(store_queue_ent) | string }}"
+                            qlist: "{{ (q.split('|') if q|length>0 else []) }}"
+
                 - variables:
                     next_track: "{{ qlist[0] }}"
                     remaining: "{{ qlist[1:] }}"
-                    url: "{{ resolved_base ~ '/local/' ~ next_track }}"
+                    url: "{{ base.rstrip('/') ~ '/local/' ~ next_track }}"
 
                 - service: input_text.set_value
                   target:
@@ -274,7 +260,7 @@ action:
                   timeout: "01:00:00"
                 - delay: "00:00:01"
 
-      # ===== A OFF -> fadeout then stop (cancel if A turns ON) =====
+      # ===== A OFF -> fadeout then stop (cancel if A ON again) =====
       - conditions:
           - condition: template
             value_template: "{{ trigger.id == 'a_any' and trigger.to_state is not none and trigger.to_state.state == 'off' }}"
@@ -304,6 +290,7 @@ action:
                     milliseconds: "{{ fade_delay_v | int(150) }}"
                 - variables:
                     cur: "{{ state_attr(media_player_ent,'volume_level') | float(0) }}"
+
           - condition: template
             value_template: "{{ states(sensor_a_ent) == 'off' }}"
           - service: media_player.media_stop
@@ -390,7 +377,7 @@ action:
           - variables:
               next_track: "{{ qlist[0] }}"
               remaining: "{{ qlist[1:] }}"
-              url: "{{ resolved_base ~ '/local/' ~ next_track }}"
+              url: "{{ base.rstrip('/') ~ '/local/' ~ next_track }}"
           - service: input_text.set_value
             target:
               entity_id: !input store_track_queue
